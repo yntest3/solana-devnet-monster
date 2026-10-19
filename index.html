@@ -114,7 +114,9 @@ const html = htm.bind(React.createElement);
 // ============================================================
 const MODEL = "claude-opus-5-5";
 const DEVNET_RPC = "https://api.devnet.solana.com";
-const MEMO_PROGRAM_ID = "MemoSq4gqABAXKb96qQH2RD2FzZ7b8n8bA2tGnNnwTk";
+const MEMO_PROGRAM_ID = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"; // SPL Memo v2
+// Memoプログラムは UTF-8 検証のコストが大きく、日本語の最大長メモで約63万CUを消費する（既定上限は20万CU）
+const MEMO_COMPUTE_UNITS = 1_000_000;
 const APP_TAG = "AIMonsterBattle";
 const LS_KEY = "aimb_anthropic_api_key";
 
@@ -551,22 +553,33 @@ async function recordOnDevnet(provider, ownerAddress, memo) {
   const { web3 } = await loadSolana();
   const connection = await getConnection();
   const owner = new web3.PublicKey(ownerAddress);
-  const tx = new web3.Transaction().add(new web3.TransactionInstruction({
-    keys: [{ pubkey: owner, isSigner: true, isWritable: true }],
-    programId: new web3.PublicKey(MEMO_PROGRAM_ID),
-    data: new TextEncoder().encode(memo),
-  }));
+  const tx = new web3.Transaction().add(
+    web3.ComputeBudgetProgram.setComputeUnitLimit({ units: MEMO_COMPUTE_UNITS }),
+    new web3.TransactionInstruction({
+      keys: [{ pubkey: owner, isSigner: true, isWritable: true }],
+      programId: new web3.PublicKey(MEMO_PROGRAM_ID),
+      data: new TextEncoder().encode(memo),
+    }),
+  );
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
   tx.recentBlockhash = blockhash;
   tx.feePayer = owner;
 
   let signature;
-  if (typeof provider.signTransaction === "function") {
-    // 署名だけPhantomで行い、送信は必ずDevnet RPCへ
-    const signed = await provider.signTransaction(tx);
-    signature = await connection.sendRawTransaction(signed.serialize());
-  } else {
-    ({ signature } = await provider.signAndSendTransaction(tx));
+  try {
+    if (typeof provider.signTransaction === "function") {
+      // 署名だけPhantomで行い、送信は必ずDevnet RPCへ
+      const signed = await provider.signTransaction(tx);
+      signature = await connection.sendRawTransaction(signed.serialize());
+    } else {
+      ({ signature } = await provider.signAndSendTransaction(tx));
+    }
+  } catch (e) {
+    if (e instanceof web3.SendTransactionError) {
+      const logs = await e.getLogs(connection).catch(() => null);
+      if (logs?.length) console.error("Devnet simulation logs:\n" + logs.join("\n"));
+    }
+    throw e;
   }
   const conf = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
   if (conf.value.err) throw new Error(`トランザクション失敗: ${JSON.stringify(conf.value.err)}`);
